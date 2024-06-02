@@ -1,10 +1,17 @@
+import os
+
 import boto3
 from boto3.dynamodb.conditions import Key
 from datetime import datetime
 import uuid
 
-dynamodb = boto3.resource('dynamodb', 'us-east-1')
+region = os.getenv('AWS_REGION')
+if region:
+    dynamodb = boto3.resource('dynamodb', region)
+else:
+    dynamodb = boto3.resource('dynamodb')
 
+cache = {}
 TABLE_NAME = 'ParkingLot'
 CHARGE_INTERVAL_MIN = 15
 CHARGE_COST = 2.5
@@ -13,11 +20,13 @@ table = dynamodb.Table(TABLE_NAME)
 
 def parking_entry(plate, parking_lot):
     # Query to check if the car is already parked in the specified parking lot
-    response = table.query(
-        IndexName='PlateParkingLotIndex',
-        KeyConditionExpression=Key('plate').eq(plate) & Key('parking_lot').eq(parking_lot)
-    )
-
+    try:
+        response = table.query(
+            IndexName='PlateParkingLotIndex',
+            KeyConditionExpression=Key('plate').eq(plate) & Key('parkingLot').eq(parking_lot)
+        )
+    except Exception:
+        response = {'Items': None}
     if response['Items']:
         return {'error': 'This car is already parked in the specified parking lot.'}
 
@@ -31,7 +40,10 @@ def parking_entry(plate, parking_lot):
         'entryTime': int(datetime.timestamp(entry_time))
     }
 
-    table.put_item(Item=ticket_record)
+    try:
+        table.put_item(Item=ticket_record)
+    except Exception:
+        cache[ticket_record['ticketId']] = ticket_record
 
     return ticket_record
 
@@ -47,20 +59,25 @@ def parking_exit(ticket_id):
     exit_time = datetime.now()
     if not ticket_id:
         return {'error': 'Missing ticketId.'}
+    try:
+        response = table.get_item(Key={'ticketId': ticket_id})
+        if 'Item' not in response:
+            return {'error': 'Your ticket is invalid, please send the right one.'}
+        record = response['Item']
+    except Exception:
+        record = cache.get(ticket_id)
 
-    response = table.get_item(Key={'ticket_id': ticket_id})
-    if 'Item' not in response:
-        return {'error': 'Your ticket is invalid, please send the right one.'}
-    record = response['Item']
-
-    entry_time = datetime.fromtimestamp(record['entry_time'], tz=None)
+    entry_time = datetime.fromtimestamp(record['entryTime'], tz=None)
     parked_time, charge = _get_charge(entry_time, exit_time)
 
-    table.delete_item(Key={'ticket_id': ticket_id})
+    try:
+        table.delete_item(Key={'ticketId': ticket_id})
+    except Exception:
+        cache.pop(ticket_id)
 
     return {
         'plate': record['plate'],
-        'parkingLot': record['parking_lot'],
+        'parkingLot': record['parkingLot'],
         'totalParkedTime': str(parked_time),
         'charge': round(charge, 2)
     }

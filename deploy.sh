@@ -17,6 +17,23 @@ chmod 400 "$KEY_PEM"
 # Create a unique security group name
 SEC_GRP="my-sg-$(date)"
 
+aws iam create-instance-profile --instance-profile-name ec2_dynamodb_profile
+
+# Create roles
+LAMBDA_ROLE_ARN=$(
+  aws iam create-role \
+  --role-name lambda_dynamodb_role \
+  --assume-role-policy-document file://trust-policy.json | jq -r '.Role' | jq -r '.Arn')
+
+PUT_POLICY=$(aws iam put-role-policy \
+  --role-name lambda_dynamodb_role \
+  --policy-name DynamoDBFullAccessPolicy \
+  --policy-document file://policy.json)
+
+aws iam add-role-to-instance-profile \
+    --instance-profile-name ec2_dynamodb_profile \
+    --role-name lambda_dynamodb_role
+
 # Create the security group
 echo "setup firewall $SEC_GRP"
 aws ec2 create-security-group   \
@@ -48,10 +65,15 @@ RUN_INSTANCES=$(aws ec2 run-instances   \
     --image-id $UBUNTU_20_04_AMI        \
     --instance-type t3.micro            \
     --key-name "$KEY_NAME"                \
+    --iam-instance-profile Name=ec2_dynamodb_profile \
     --security-groups "$SEC_GRP")
 
 # Extract the instance ID
 INSTANCE_ID=$(echo "$RUN_INSTANCES" | jq -r '.Instances[0].InstanceId')
+
+aws ec2 associate-iam-instance-profile \
+    --instance-id "$INSTANCE_ID" \
+    --iam-instance-profile Name=ec2_dynamodb_profile
 
 # Wait for the instance to be running
 echo "Waiting for instance creation..."
@@ -69,29 +91,18 @@ echo "create DynamoDB table"
 TABLE_DEF=$(aws dynamodb create-table \
     --table-name ParkingLot \
     --attribute-definitions \
-        AttributeName=ticket_id,AttributeType=S \
+        AttributeName=ticketId,AttributeType=S \
         AttributeName=plate,AttributeType=S \
-        AttributeName=parking_lot,AttributeType=S \
+        AttributeName=parkingLot,AttributeType=S \
     --key-schema \
-        AttributeName=ticket_id,KeyType=HASH \
+        AttributeName=ticketId,KeyType=HASH \
     --global-secondary-indexes \
         'IndexName=PlateParkingLotIndex,
-        KeySchema=[{AttributeName=plate,KeyType=HASH},{AttributeName=parking_lot,KeyType=RANGE}],
+        KeySchema=[{AttributeName=plate,KeyType=HASH},{AttributeName=parkingLot,KeyType=RANGE}],
         Projection={ProjectionType=ALL},
         ProvisionedThroughput={ReadCapacityUnits=5,WriteCapacityUnits=5}' \
     --provisioned-throughput \
         ReadCapacityUnits=5,WriteCapacityUnits=5)
-
-# Create roles
-LAMBDA_ROLE_ARN=$(
-  aws iam create-role \
-  --role-name lambda_dynamodb_role \
-  --assume-role-policy-document file://trust-policy.json | jq -r '.Role' | jq -r '.Arn')
-
-PUT_POLICY=$(aws iam put-role-policy \
-  --role-name lambda_dynamodb_role \
-  --policy-name DynamoDBFullAccessPolicy \
-  --policy-document file://policy.json)
 
 # Wait for policy to update
 sleep 5
@@ -116,16 +127,6 @@ LAMBDA_EXIT_ARN=$(aws lambda create-function \
 # Create logs group
 aws logs create-log-group --log-group-name /aws/lambda/parking_lot_entry
 aws logs create-log-group --log-group-name /aws/lambda/parking_lot_exit
-
-# Create IAM role for APIGateway
-API_GW_ROLE_ARN=$(
-  aws iam create-role \
-  --role-name api_gw_role \
-  --assume-role-policy-document file://trust-policy.json | jq -r '.Role' | jq -r '.Arn')
-aws iam put-role-policy --role-name api_gw_role --policy-name InvokeLambdaPolicy --policy-document file://gw_policy.json
-
-sleep 5
-
 
 # Create an API Gateway endpoint to trigger the Lambda function
 API_ID=$(aws apigatewayv2 create-api \
@@ -182,7 +183,7 @@ aws lambda add-permission \
 
 # Deploy the application to the instance
 echo "deploying code.."
-scp -i "$KEY_PEM" -o "StrictHostKeyChecking=no" -o "ConnectionAttempts=60" src/app.py src/parking_lot.py requirements.txt ~/.aws/credentials ubuntu@"$PUBLIC_IP":/home/ubuntu/
+scp -i "$KEY_PEM" -o "StrictHostKeyChecking=no" -o "ConnectionAttempts=60" src/app.py src/parking_lot.py requirements.txt ~/.aws/config ubuntu@"$PUBLIC_IP":/home/ubuntu/
 aws apigatewayv2 create-deployment --api-id "$API_ID" --stage-name prod
 
 # Set up the production environment and run the Flask app
@@ -193,6 +194,8 @@ ssh -i $KEY_PEM -o "StrictHostKeyChecking=no" -o "ConnectionAttempts=10" ubuntu@
     sudo apt install python3-flask -y
     sudo apt install python3-pip -y
     pip3 install -r /home/ubuntu/requirements.txt
+    mkdir ~/.aws
+    cp /home/ubuntu/config ~/.aws
     # run app
     nohup flask run --host 0.0.0.0 --port 5001 &>/dev/null &
     exit

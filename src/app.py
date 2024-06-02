@@ -1,16 +1,12 @@
-import boto3
 from flask import Flask, request, jsonify
 
 import parking_lot
 
 app = Flask(__name__)
-dynamodb = boto3.resource('dynamodb', 'us-east-1')
 
 TABLE_NAME = 'ParkingLot'
 CHARGE_INTERVAL_MIN = 15
 CHARGE_COST = 2.5
-
-table = dynamodb.Table(TABLE_NAME)
 
 
 @app.route('/health', methods=['GET'])
